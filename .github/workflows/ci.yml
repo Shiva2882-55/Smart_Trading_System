@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+      - qa
+      - uat
+  pull_request:
+    branches:
+      - main
+      - dev
+      - qa
+      - uat
+
+jobs:
+  test-lint-build:
+    name: Test, Lint, Format, Build
+    runs-on: windows-latest
+
+    env:
+      ENVIRONMENT: local
+      DEFAULT_UNIVERSE: tests/fixtures/universe.csv
+      REPORT_OUTPUT_DIR: reports
+      LOG_DIR: logs
+      DATABASE_PATH: data/stock_agent.db
+      LOCK_FILE: data/stock_agent.lock
+      LOCK_STALE_AFTER_SECONDS: "21600"
+      MARKET_PROVIDER: mock
+      NEWS_PROVIDER: mock
+      ENABLE_EXCEL_REPORT: "true"
+      ENABLE_SQLITE_HISTORY: "true"
+      REQUEST_RETRY_ATTEMPTS: "3"
+      REQUEST_BASE_DELAY_SECONDS: "1"
+      REQUEST_MAX_DELAY_SECONDS: "8"
+      REQUEST_TIMEOUT_SECONDS: "30"
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Install package with dev dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Create runtime folders
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force reports | Out-Null
+          New-Item -ItemType Directory -Force logs | Out-Null
+          New-Item -ItemType Directory -Force data | Out-Null
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Format check
+        run: ruff format --check .
+
+      - name: Type check
+        run: mypy src/stock_agent
+
+      - name: Test
+        run: pytest -q
+
+      - name: Healthcheck
+        run: stock-agent healthcheck
+
+      - name: Build package
+        run: python -m build
+
+      - name: Check package metadata
+        run: twine check dist/*
+
+      - name: Install built wheel
+        shell: pwsh
+        run: |
+          $wheel = Get-ChildItem dist/*.whl | Select-Object -First 1
+          pip install --force-reinstall $wheel.FullName
+
+      - name: Verify CLI entrypoint
+        run: stock-agent --help

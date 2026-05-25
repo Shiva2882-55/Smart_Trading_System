@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from stock_agent.domain.run_report import ProviderIssue
+
 
 @dataclass(slots=True)
 class NewsSignal:
@@ -31,6 +33,9 @@ class StockSnapshot:
     market_cap: float | None
     annualized_volatility: float | None
     max_drawdown_6m: float | None
+    source: str = "unknown"
+    degraded: bool = False
+    warning: str | None = None
     news: list[NewsSignal] = field(default_factory=list)
 
 
@@ -65,3 +70,17 @@ class Recommendation:
     stop_loss: float
     take_profit: float
     position_size_note: str
+
+
+@dataclass(slots=True)
+class StockAnalysisResult:
+    ticker: str
+    snapshot: StockSnapshot | None
+    news: list[NewsSignal]
+    status: str
+    error: str | None = None
+    error_type: str | None = None
+    provider: str | None = None
+    degraded: bool = False
+    warning: str | None = None
+    provider_issues: list[ProviderIssue] = field(default_factory=list)

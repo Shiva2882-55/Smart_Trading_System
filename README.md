@@ -8,6 +8,7 @@ This project is a Python-based India stock analysis agent that:
 - ranks Indian stocks by priority
 - generates `BUY`, `HOLD`, or `SELL` style signals
 - exports the results to Excel
+- stores run history in PostgreSQL
 
 ## What it does
 
@@ -57,8 +58,10 @@ The date and time columns show when the signal was created, not a guaranteed fut
 ## Project structure
 
 ```text
-run_agent.py
+pyproject.toml
+requirements.lock
 requirements.txt
+run_agent.py
 .env.example
 src/stock_agent/
 watchlists/
@@ -72,52 +75,174 @@ Open PowerShell in the project folder and run:
 ```powershell
 python -m venv .venv
 .venv\Scripts\activate
-pip install -r requirements.txt
+pip install -e .
 copy .env.example .env
 ```
 
-If Excel export fails because of a missing package, run:
+For local development tools:
 
 ```powershell
-pip install openpyxl
+pip install -e ".[dev]"
 ```
+
+For reproducible runtime installs:
+
+```powershell
+pip install -r requirements.lock
+```
+
+If PostgreSQL support is missing in your environment:
+
+```powershell
+pip install "psycopg[binary]>=3.2,<4.0"
+```
+
+Recommended pre-push checks:
+
+```powershell
+ruff check .
+ruff format --check .
+mypy src/stock_agent
+pytest -q
+python -m build
+twine check dist/*
+stock-agent --help
+```
+
+Configuration is validated at startup. If retry values, provider names, output directories, database settings, or the universe file are invalid, the app stops before analysis begins with a clear error.
+
+## Database setup
+
+The current runtime database is PostgreSQL.
+
+Default connection settings:
+
+- host: `localhost`
+- port: `5432`
+- database: `trading_stock_db`
+- username: `postgres`
+- password: `5502`
+- schema: `trading_stock`
+
+The app automatically creates and uses these tables inside the `trading_stock` schema:
+
+- `analysis_runs`
+- `run_ticker_results`
+- `provider_errors`
+
+If the schema or tables do not exist yet, `stock-agent healthcheck` or the first run will create them automatically.
 
 ## How to run
 
 Run the default watchlist:
 
 ```powershell
-python run_agent.py
+stock-agent run
+```
+
+Backward-compatible script entrypoint:
+
+```powershell
+python run_agent.py run
+```
+
+Validate startup configuration only:
+
+```powershell
+stock-agent healthcheck
+```
+
+Run continuously in a loop until you stop it:
+
+```powershell
+stock-agent watch --tickers TCS.NS INFY.NS --interval-seconds 300
+```
+
+Use `Ctrl+C` to stop watch mode.
+
+Show recent run history from PostgreSQL:
+
+```powershell
+stock-agent history --limit 10
 ```
 
 Run specific stocks:
 
 ```powershell
-python run_agent.py --tickers AAPL MSFT NVDA AMZN META
+stock-agent run --tickers TCS.NS INFY.NS RELIANCE.NS
 ```
 
 Run a ticker file:
 
 ```powershell
-python run_agent.py --universe watchlists/core_watchlist.txt
+stock-agent run --universe watchlists/core_watchlist.txt
 ```
+
+Run from a previous Excel report:
+
+```powershell
+stock-agent run --input-excel reports\stock_analysis_25-05-26--15-56.xlsx
+```
+
+You can also point `--universe` to an Excel file, and the app will read ticker columns like `ticker` or `leader_ticker`.
 
 Run the India preset universe:
 
 ```powershell
-python run_agent.py --preset nifty50 --top 20 --output nifty50_ranked_stocks.xlsx
+stock-agent run --preset nifty50 --top 20 --output nifty50_ranked_stocks.xlsx
 ```
 
 Save output to a custom Excel file:
 
 ```powershell
-python run_agent.py --tickers AAPL MSFT NVDA --output stock_report.xlsx
+stock-agent run --tickers TCS.NS INFY.NS --output stock_report.xlsx
 ```
+
+Save reports to a directory:
+
+```powershell
+stock-agent run --output-dir reports
+```
+
+Run safely without live providers:
+
+```powershell
+$env:MARKET_PROVIDER="mock"
+$env:NEWS_PROVIDER="mock"
+stock-agent run --tickers TCS.NS INFY.NS --output-dir reports
+```
+
+Before analysis starts, the CLI now prints continuous feedback about what it understood, including:
+
+- whether input came from explicit tickers, a text watchlist, or an Excel file
+- which Excel sheet and column were used
+- how many tickers were loaded
+- a short ticker preview
+- which providers will be used
+- where the output report will be written
+
+In `watch` mode, it repeats this process every cycle and tells you:
+
+- which watch cycle is running
+- when a cycle starts and finishes
+- the last exit code
+- how long it will sleep before the next cycle
 
 ## Excel output
 
+Each run creates a new timestamped Excel file using Kolkata time (`Asia/Kolkata`), for example:
+
+```text
+stock_analysis_25-05-26--15-35.xlsx
+```
+
+If a file already exists for the same minute, a numeric suffix is added instead of overwriting the file.
+
 The generated Excel file contains these sheets:
 
+- `Dashboard`
+- `Run Summary`
+- `Provider Issues`
 - `Report Summary`
 - `Comparison Summary`
 - `All Ranked Stocks`
@@ -155,6 +280,45 @@ Important columns:
 - `top_reason_1`
 - `top_reason_2`
 
+### `Dashboard`
+
+The first sheet is now a user-friendly dashboard for quick understanding.
+
+It includes:
+
+- run status and warning severity
+- total requested, succeeded, failed, and skipped counts
+- degraded source summary
+- top stock, top action, average score, and average confidence
+- top recommendations table
+- a previous-report comparison section
+- a plain-language answer to whether following the previous report looked helpful or not
+- comparison details for quick review
+
+## Reliability and runtime behavior
+
+Each run writes structured JSON logs to `logs/stock_agent.log` with fields such as `run_id`, `ticker`, `provider`, `retry_attempt`, `latency_ms`, and failure details.
+
+Run metadata is persisted to PostgreSQL. Excel remains the report output, while PostgreSQL keeps permanent history for runs, ticker-level results, and provider failures.
+
+Runs produce explicit partial-failure summaries too. When some tickers or providers fail, the run can still finish as `PARTIAL_SUCCESS`, with warning severity, degraded sources, console summary output, database audit entries, and extra Excel sheets for `Run Summary` and `Provider Issues`.
+
+The runtime uses provider abstraction:
+
+- `providers/yfinance_provider.py` handles market data only
+- `providers/google_news_provider.py` handles news only
+- `providers/fallback_provider.py` handles best-effort fallback and degraded mode
+- `services/analysis_service.py` orchestrates them
+- `providers/mock_provider.py` supports network-free tests
+
+The application flow is split by layer:
+
+- `cli.py` bootstraps commands and exit codes
+- `services/run_orchestrator.py` controls the full run
+- `services/analysis_service.py` analyzes one ticker at a time
+- `providers/` own yfinance, Google News, Excel, and PostgreSQL I/O
+- `models.py`, `scoring.py`, and `domain/` hold business rules and reporting models
+
 ## How the scoring works
 
 The final ranking is a weighted combination of:
@@ -188,7 +352,7 @@ The final ranking is a weighted combination of:
 ## Example workflow
 
 1. Run the agent in the morning or before market open.
-2. Open `stock_analysis.xlsx`.
+2. Open the newest `stock_analysis_dd-mm-yy--hr-mm.xlsx` report.
 3. Start with the `All Ranked Stocks` sheet.
 4. Look at the highest `priority_rank` stocks.
 5. Check `action`, `risk_score`, and `top_reason_1`.
@@ -209,7 +373,7 @@ This helps answer:
 
 - if you had followed the earlier `BUY_NOW` or `BUY_ON_DIP` action, what would the result look like now
 - if you had followed `SELL_NOW` or `AVOID`, would staying out have helped
-- how each stock’s priority rank changed from the previous report
+- how each stock's priority rank changed from the previous report
 
 Important note:
 
@@ -221,13 +385,12 @@ Important note:
 
 - Internet access is required for live market and news data.
 - Results can change throughout the day because prices and headlines change.
-- If a data source is temporarily unavailable, some signals may be weaker or missing.
+- If a data source is temporarily unavailable, the run may still finish in degraded mode or `PARTIAL_SUCCESS`.
+- External calls use structured retry logging with exponential backoff for traceability.
 
 ## Future improvements
 
-- Excel formatting with colors for `BUY`, `HOLD`, and `SELL`
-- stop-loss and take-profit suggestion columns
-- SEC filings and earnings transcript analysis
-- scheduled daily report generation
-- OpenAI-based narrative summaries
+- additional formal market-data/news providers behind the fallback layer
 - email or Telegram delivery
+- OpenAI-based narrative summaries
+- scheduled cloud deployment options
